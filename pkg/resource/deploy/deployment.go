@@ -16,6 +16,9 @@ package deploy
 
 import (
 	"context"
+	"crypto"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"sync"
@@ -430,4 +433,28 @@ func (d *Deployment) generateEventURN(event SourceEvent) resource.URN {
 func (d *Deployment) Execute(ctx context.Context, opts Options, preview bool) (*Plan, result.Result) {
 	deploymentExec := &deploymentExecutor{deployment: d}
 	return deploymentExec.Execute(ctx, opts, preview)
+}
+
+func makeRandomSeed(urn resource.URN, sequenceNumber int32) []byte {
+	// if sequenceNumber is <= 0 we can't use a deterministic hash
+	if sequenceNumber <= 0 {
+		bs := make([]byte, 64)
+		n, err := cryptorand.Read(bs)
+		contract.AssertNoError(err)
+		contract.Assert(n == len(bs))
+		return bs
+	}
+
+	hasher := crypto.SHA512.New()
+
+	_, err := hasher.Write([]byte(urn))
+	contract.AssertNoError(err)
+
+	err = binary.Write(hasher, binary.LittleEndian, uint32(sequenceNumber))
+	contract.AssertNoError(err)
+
+	bs := hasher.Sum(nil)
+	contract.Assert(len(bs) == 64)
+
+	return bs
 }

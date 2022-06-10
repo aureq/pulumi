@@ -421,24 +421,18 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 				// Only increment/change sequence number if this is a replace. If hasOld is false this is a
 				// new resource and sequence number will already be correctly set to 1.
 				if new.SequenceNumber == -1 {
-					// This is known to have been created with a non-deterministic sequnce number in the last
+					// This is known to have been created with a non-deterministic sequence number in the last
 					// update, it should now be safe to create with sequence number == 1 as that shouldn't
 					// clash with the current random name.
 					new.SequenceNumber = 1
 				} else if new.SequenceNumber == 0 {
-					// We don't have any info on the current resources sequnce number, but we know we're
-					// going to do a replace with sequnce number == 0 to create a random name so the next
-					// time we do a replace it should be safe to go back to sequnce number == 1 (see above)
+					// We don't have any info on the current resources sequence number, but we know we're
+					// going to do a replace with sequence number == 0 to create a random name so the next
+					// time we do a replace it should be safe to go back to sequence number == 1 (see above)
 					new.SequenceNumber = -1
 				} else {
 					new.SequenceNumber++
 				}
-			}
-
-			checkNumber := new.SequenceNumber
-			// We don't want to call check with -1, that's just an internal state file marker
-			if checkNumber == -1 {
-				checkNumber = 0
 			}
 
 			// If we have a plan for this resource we need to feed the saved checked inputs to Check to remove non-determinism
@@ -449,14 +443,11 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 				}
 			}
 
-			inputs, failures, err = prov.Check(urn, oldChecked, goal.Properties, allowUnknowns, checkNumber)
+			randomSeed := makeRandomSeed(urn, new.SequenceNumber)
+			inputs, failures, err = prov.Check(urn, oldChecked, goal.Properties, allowUnknowns, randomSeed)
 		} else {
-			checkNumber := new.SequenceNumber
-			// We don't want to call check with -1, that's just an internal state file marker
-			if checkNumber == -1 {
-				checkNumber = 0
-			}
-			inputs, failures, err = prov.Check(urn, oldInputs, inputs, allowUnknowns, checkNumber)
+			randomSeed := makeRandomSeed(urn, new.SequenceNumber)
+			inputs, failures, err = prov.Check(urn, oldInputs, inputs, allowUnknowns, randomSeed)
 		}
 
 		if err != nil {
@@ -749,20 +740,17 @@ func (sg *stepGenerator) generateStepsFromDiff(
 			// Note that if we're performing a targeted replace, we already have the correct inputs.
 			if prov != nil && !sg.isTargetedReplace(urn) {
 				// Increment the sequence number (if it's known) before calling check so we get a new autoname
-				var checkNumber int
 				if new.SequenceNumber == -1 {
 					new.SequenceNumber = 1
-					checkNumber = 1
 				} else if new.SequenceNumber == 0 {
 					new.SequenceNumber = -1
-					checkNumber = 0
 				} else {
 					new.SequenceNumber++
-					checkNumber = new.SequenceNumber
 				}
 
 				var failures []plugin.CheckFailure
-				inputs, failures, err = prov.Check(urn, nil, goal.Properties, allowUnknowns, checkNumber)
+				randomSeed := makeRandomSeed(urn, new.SequenceNumber)
+				inputs, failures, err = prov.Check(urn, nil, goal.Properties, allowUnknowns, randomSeed)
 				if err != nil {
 					return nil, result.FromError(err)
 				} else if issueCheckErrors(sg.deployment, new, urn, failures) {

@@ -248,7 +248,10 @@ func (i *importer) registerProviders(ctx context.Context) (map[resource.URN]stri
 		if url := req.PluginDownloadURL(); url != "" {
 			providers.SetProviderURL(inputs, url)
 		}
-		inputs, failures, err := i.deployment.providers.Check(urn, nil, inputs, false, 0)
+
+		// providers always have a sequence number of 0
+		randomSeed := makeRandomSeed(urn, 0)
+		inputs, failures, err := i.deployment.providers.Check(urn, nil, inputs, false, randomSeed)
 		if err != nil {
 			return nil, result.Errorf("failed to validate provider config: %v", err), false
 		}
