@@ -136,6 +136,9 @@ type pkgContext struct {
 	names       codegen.StringSet
 	renamed     map[string]string
 
+	// A mapping between external packages and their bound contents.
+	externalPackages map[*schema.Package]map[string]*pkgContext
+
 	// duplicateTokens tracks tokens that exist for both types and resources
 	duplicateTokens map[string]bool
 	functionNames   map[*schema.Function]string
@@ -218,6 +221,20 @@ func (pkg *pkgContext) tokenToType(tok string) string {
 	return strings.ReplaceAll(importPath+"."+name, "-provider", "")
 }
 
+// Resolve a enum type to its name.
+func (pkg *pkgContext) resolveEnumType(t *schema.EnumType) string {
+	if !pkg.isExternalReference(t) {
+		return pkg.tokenToEnum(t.Token)
+	}
+
+	extPkgCtx, _ := pkg.contextForExternalReference(t)
+	enumType := extPkgCtx.tokenToEnum(t.Token)
+	if !strings.Contains(enumType, ".") {
+		enumType = fmt.Sprintf("%s.%s", extPkgCtx.pkg.Name, enumType)
+	}
+	return enumType
+}
+
 func (pkg *pkgContext) tokenToEnum(tok string) string {
 	// token := pkg : module : member
 	// module := path/to/module
@@ -234,6 +251,7 @@ func (pkg *pkgContext) tokenToEnum(tok string) string {
 	mod, name := pkg.tokenToPackage(tok), components[2]
 
 	name = Title(name)
+
 	if modPkg, ok := pkg.packages[mod]; ok {
 		newName, renamed := modPkg.renamed[name]
 		if renamed {
@@ -251,7 +269,15 @@ func (pkg *pkgContext) tokenToEnum(tok string) string {
 	if mod == "" {
 		mod = components[0]
 	}
-	return strings.Replace(mod, "/", "", -1) + "." + name
+
+	var importPath string
+	if alias, hasAlias := pkg.pkgImportAliases[path.Join(pkg.importBasePath, mod)]; hasAlias {
+		importPath = alias
+	} else {
+		importPath = strings.ReplaceAll(mod, "/", "")
+	}
+
+	return importPath + "." + name
 }
 
 func (pkg *pkgContext) tokenToResource(tok string) string {
@@ -360,7 +386,7 @@ func (pkg *pkgContext) inputType(t schema.Type) (result string) {
 		return pkg.inputType(t.ElementType)
 	case *schema.EnumType:
 		// Since enum type is itself an input
-		return pkg.tokenToEnum(t.Token) + "Input"
+		return pkg.resolveEnumType(t) + "Input"
 	case *schema.ArrayType:
 		en := pkg.inputType(t.ElementType)
 		return strings.TrimSuffix(en, "Input") + "ArrayInput"
@@ -422,7 +448,7 @@ func (pkg *pkgContext) argsTypeImpl(t schema.Type) (result string) {
 		return pkg.argsTypeImpl(t.ElementType)
 	case *schema.EnumType:
 		// Since enum type is itself an input
-		return pkg.tokenToEnum(t.Token)
+		return pkg.resolveEnumType(t)
 	case *schema.ArrayType:
 		en := pkg.argsTypeImpl(t.ElementType)
 		return strings.TrimSuffix(en, "Args") + "Array"
@@ -484,6 +510,20 @@ func (pkg *pkgContext) typeStringImpl(t schema.Type, argsType bool) string {
 			if isNilType(input.ElementType) || elem == "pulumi.Input" {
 				return elem
 			}
+			if pkg.isExternalReference(input.ElementType) {
+				_, details := pkg.contextForExternalReference(input.ElementType)
+
+				switch input.ElementType.(type) {
+				case *schema.ObjectType:
+					if !details.ptrInput {
+						return "*" + elem
+					}
+				case *schema.EnumType:
+					if !(details.ptrInput || details.input) {
+						return "*" + elem
+					}
+				}
+			}
 			if argsType {
 				return elem + "Ptr"
 			}
@@ -501,7 +541,7 @@ func (pkg *pkgContext) typeStringImpl(t schema.Type, argsType bool) string {
 		}
 		return pkg.inputType(t.ElementType)
 	case *schema.EnumType:
-		return pkg.tokenToEnum(t.Token)
+		return pkg.resolveEnumType(t)
 	case *schema.ArrayType:
 		typ := "[]"
 		return typ + pkg.typeStringImpl(t.ElementType, argsType)
@@ -562,22 +602,37 @@ func (pkg *pkgContext) typeString(t schema.Type) string {
 }
 
 func (pkg *pkgContext) isExternalReference(t schema.Type) bool {
-	isExternal, _ := pkg.isExternalReferenceWithPackage(t)
+	isExternal, _, _ := pkg.isExternalReferenceWithPackage(t)
 	return isExternal
 }
 
-func (pkg *pkgContext) isExternalReferenceWithPackage(t schema.Type) (isExternal bool, extPkg *schema.Package) {
+// Return if `t` is external to `pkg`. If so, the associated foreign schema.Package is returned.
+func (pkg *pkgContext) isExternalReferenceWithPackage(t schema.Type) (
+	isExternal bool, extPkg *schema.Package, token string) {
+	var err error
 	switch typ := t.(type) {
 	case *schema.ObjectType:
 		isExternal = typ.Package != nil && pkg.pkg != nil && typ.Package != pkg.pkg
 		if isExternal {
-			extPkg = typ.Package
+			extPkg, err = typ.PackageReference.Definition()
+			contract.AssertNoError(err)
+			token = typ.Token
 		}
 		return
 	case *schema.ResourceType:
 		isExternal = typ.Resource != nil && pkg.pkg != nil && typ.Resource.Package != pkg.pkg
 		if isExternal {
-			extPkg = typ.Resource.Package
+			extPkg, err = typ.Resource.PackageReference.Definition()
+			contract.AssertNoError(err)
+			token = typ.Token
+		}
+		return
+	case *schema.EnumType:
+		isExternal = pkg.pkg != nil && typ.Package != pkg.pkg
+		if isExternal {
+			extPkg, err = typ.PackageReference.Definition()
+			contract.AssertNoError(err)
+			token = typ.Token
 		}
 		return
 	}
@@ -592,7 +647,7 @@ func (pkg *pkgContext) resolveResourceType(t *schema.ResourceType) string {
 	if !pkg.isExternalReference(t) {
 		return pkg.tokenToResource(t.Token)
 	}
-	extPkgCtx := pkg.contextForExternalReference(t)
+	extPkgCtx, _ := pkg.contextForExternalReference(t)
 	resType := extPkgCtx.tokenToResource(t.Token)
 	if !strings.Contains(resType, ".") {
 		resType = fmt.Sprintf("%s.%s", extPkgCtx.pkg.Name, resType)
@@ -612,11 +667,12 @@ func (pkg *pkgContext) resolveObjectType(t *schema.ObjectType) string {
 		}
 		return name
 	}
-	return pkg.contextForExternalReference(t).typeString(t)
+	extPkg, _ := pkg.contextForExternalReference(t)
+	return extPkg.typeString(t)
 }
 
-func (pkg *pkgContext) contextForExternalReference(t schema.Type) *pkgContext {
-	isExternal, extPkg := pkg.isExternalReferenceWithPackage(t)
+func (pkg *pkgContext) contextForExternalReference(t schema.Type) (*pkgContext, typeDetails) {
+	isExternal, extPkg, token := pkg.isExternalReferenceWithPackage(t)
 	contract.Assert(isExternal)
 
 	var goInfo GoPackageInfo
@@ -646,13 +702,21 @@ func (pkg *pkgContext) contextForExternalReference(t schema.Type) *pkgContext {
 		}
 	}
 
-	extPkgCtx := &pkgContext{
-		pkg:              extPkg,
-		importBasePath:   goInfo.ImportBasePath,
-		pkgImportAliases: pkgImportAliases,
-		modToPkg:         goInfo.ModuleToPackage,
+	var maps map[string]*pkgContext
+	if pkg.externalPackages == nil {
+		pkg.externalPackages = map[*schema.Package]map[string]*pkgContext{}
 	}
-	return extPkgCtx
+	if extMap, ok := pkg.externalPackages[extPkg]; ok {
+		maps = extMap
+	} else {
+		maps = generatePackageContextMap(pkg.tool, extPkg, goInfo)
+		pkg.externalPackages[extPkg] = maps
+	}
+	extPkgCtx := maps[""]
+	extPkgCtx.pkgImportAliases = pkgImportAliases
+	mod := tokenToPackage(extPkg, goInfo.ModuleToPackage, token)
+
+	return extPkgCtx, *maps[mod].detailsForType(t)
 }
 
 // outputTypeImpl does the meat of the generation of output type names from schema types. This function should only be
@@ -665,9 +729,22 @@ func (pkg *pkgContext) outputTypeImpl(t schema.Type) string {
 		if isNilType(t.ElementType) || elem == "pulumi.AnyOutput" {
 			return elem
 		}
+		if pkg.isExternalReference(t.ElementType) {
+			_, details := pkg.contextForExternalReference(t.ElementType)
+			switch t.ElementType.(type) {
+			case *schema.ObjectType:
+				if !details.ptrOutput {
+					return "*" + elem
+				}
+			case *schema.EnumType:
+				if !(details.ptrOutput || details.output) {
+					return "*" + elem
+				}
+			}
+		}
 		return strings.TrimSuffix(elem, "Output") + "PtrOutput"
 	case *schema.EnumType:
-		return pkg.tokenToEnum(t.Token) + "Output"
+		return pkg.resolveEnumType(t) + "Output"
 	case *schema.ArrayType:
 		en := strings.TrimSuffix(pkg.outputTypeImpl(t.ElementType), "Output")
 		if en == "pulumi.Any" {
@@ -2314,7 +2391,13 @@ func (pkg *pkgContext) collectNestedCollectionTypes(types map[string]*nestedType
 		}
 		elementTypeName = pkg.nestedTypeToType(t.ElementType)
 		elementTypeName = strings.TrimSuffix(elementTypeName, "Args") + "Array"
+
+		// We make sure that subsidiary elements are marked for array as well
+		details := pkg.detailsForType(t)
+		pkg.detailsForType(t.ElementType).markArray(details.arrayInput, details.arrayOutput)
+
 		names = pkg.addSuffixesToName(t, elementTypeName)
+		defer pkg.collectNestedCollectionTypes(types, t.ElementType)
 	case *schema.MapType:
 		// Builtins already cater to primitive maps
 		if schema.IsPrimitiveType(t.ElementType) {
@@ -2322,9 +2405,15 @@ func (pkg *pkgContext) collectNestedCollectionTypes(types map[string]*nestedType
 		}
 		elementTypeName = pkg.nestedTypeToType(t.ElementType)
 		elementTypeName = strings.TrimSuffix(elementTypeName, "Args") + "Map"
+
+		// We make sure that subsidiary elements are marked for map as well
+		details := pkg.detailsForType(t)
+		pkg.detailsForType(t.ElementType).markMap(details.mapInput, details.mapOutput)
+
 		names = pkg.addSuffixesToName(t, elementTypeName)
+		defer pkg.collectNestedCollectionTypes(types, t.ElementType)
 	default:
-		contract.Failf("unexpected type %T in collectNestedCollectionTypes", t)
+		return
 	}
 	nti, ok := types[elementTypeName]
 	if !ok {
@@ -2389,9 +2478,9 @@ func (pkg *pkgContext) genNestedCollectionTypes(w io.Writer, types map[string]*n
 func (pkg *pkgContext) nestedTypeToType(typ schema.Type) string {
 	switch t := codegen.UnwrapType(typ).(type) {
 	case *schema.ArrayType:
-		return pkg.nestedTypeToType(t.ElementType)
+		return pkg.nestedTypeToType(t.ElementType) + "Array"
 	case *schema.MapType:
-		return pkg.nestedTypeToType(t.ElementType)
+		return pkg.nestedTypeToType(t.ElementType) + "Map"
 	case *schema.ObjectType:
 		return pkg.resolveObjectType(t)
 	}
@@ -2550,12 +2639,30 @@ func (pkg *pkgContext) getTypeImports(t schema.Type, recurse bool, importsAndAli
 		return
 	}
 	seen[t] = struct{}{}
+
+	// Import an external type with `token` and return true.
+	// If the type is not external, return false.
+	importExternal := func(token string) bool {
+		if pkg.isExternalReference(t) {
+			extPkgCtx, _ := pkg.contextForExternalReference(t)
+			mod := extPkgCtx.tokenToPackage(token)
+			imp := path.Join(extPkgCtx.importBasePath, mod)
+			importsAndAliases[imp] = extPkgCtx.pkgImportAliases[imp]
+			return true
+		}
+		return false
+	}
+
 	switch t := t.(type) {
 	case *schema.OptionalType:
 		pkg.getTypeImports(t.ElementType, recurse, importsAndAliases, seen)
 	case *schema.InputType:
 		pkg.getTypeImports(t.ElementType, recurse, importsAndAliases, seen)
 	case *schema.EnumType:
+		if importExternal(t.Token) {
+			break
+		}
+
 		mod := pkg.tokenToPackage(t.Token)
 		if mod != pkg.mod {
 			p := path.Join(pkg.importBasePath, mod)
@@ -2566,13 +2673,10 @@ func (pkg *pkgContext) getTypeImports(t schema.Type, recurse bool, importsAndAli
 	case *schema.MapType:
 		pkg.getTypeImports(t.ElementType, recurse, importsAndAliases, seen)
 	case *schema.ObjectType:
-		if pkg.isExternalReference(t) {
-			extPkgCtx := pkg.contextForExternalReference(t)
-			mod := extPkgCtx.tokenToPackage(t.Token)
-			imp := path.Join(extPkgCtx.importBasePath, mod)
-			importsAndAliases[imp] = extPkgCtx.pkgImportAliases[imp]
+		if importExternal(t.Token) {
 			break
 		}
+
 		mod := pkg.tokenToPackage(t.Token)
 		if mod != pkg.mod {
 			p := path.Join(pkg.importBasePath, mod)
@@ -2588,11 +2692,7 @@ func (pkg *pkgContext) getTypeImports(t schema.Type, recurse bool, importsAndAli
 			}
 		}
 	case *schema.ResourceType:
-		if pkg.isExternalReference(t) {
-			extPkgCtx := pkg.contextForExternalReference(t)
-			mod := extPkgCtx.tokenToPackage(t.Token)
-			imp := path.Join(extPkgCtx.importBasePath, mod)
-			importsAndAliases[imp] = extPkgCtx.pkgImportAliases[imp]
+		if importExternal(t.Token) {
 			break
 		}
 		mod := pkg.tokenToPackage(t.Token)
@@ -2660,7 +2760,6 @@ func (pkg *pkgContext) getImports(member interface{}, importsAndAliases map[stri
 		for _, p := range member {
 			pkg.getTypeImports(p.Type, false, importsAndAliases, seen)
 		}
-	case *schema.EnumType: // Just need pulumi sdk, see below
 	default:
 		return
 	}
@@ -3563,6 +3662,25 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 				pkg.getImports(t, importsAndAliases)
 				hasOutputs = hasOutputs || pkg.detailsForType(t).hasOutputs()
 			}
+
+			sortedKnownTypes := make([]schema.Type, 0, len(knownTypes))
+			for k := range knownTypes {
+				sortedKnownTypes = append(sortedKnownTypes, k)
+			}
+			sort.Slice(sortedKnownTypes, func(i, j int) bool {
+				return sortedKnownTypes[i].String() < sortedKnownTypes[j].String()
+			})
+
+			collectionTypes := map[string]*nestedTypeInfo{}
+			for _, t := range sortedKnownTypes {
+				pkg.collectNestedCollectionTypes(collectionTypes, t)
+			}
+
+			// All collection types have Outputs
+			if len(collectionTypes) > 0 {
+				hasOutputs = true
+			}
+
 			var goImports []string
 			if hasOutputs {
 				goImports = []string{"context", "reflect"}
@@ -3577,22 +3695,6 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 					return nil, err
 				}
 				delete(knownTypes, t)
-			}
-
-			sortedKnownTypes := make([]schema.Type, 0, len(knownTypes))
-			for k := range knownTypes {
-				sortedKnownTypes = append(sortedKnownTypes, k)
-			}
-			sort.Slice(sortedKnownTypes, func(i, j int) bool {
-				return sortedKnownTypes[i].String() < sortedKnownTypes[j].String()
-			})
-
-			collectionTypes := map[string]*nestedTypeInfo{}
-			for _, t := range sortedKnownTypes {
-				switch typ := t.(type) {
-				case *schema.ArrayType, *schema.MapType:
-					pkg.collectNestedCollectionTypes(collectionTypes, typ)
-				}
 			}
 
 			types := pkg.genNestedCollectionTypes(buffer, collectionTypes)

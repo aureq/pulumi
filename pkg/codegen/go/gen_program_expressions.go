@@ -344,7 +344,8 @@ func outputVersionFunctionArgTypeName(t model.Type) (string, error) {
 
 	var ty string
 	if pkg.isExternalReference(objType) {
-		ty = pkg.contextForExternalReference(objType).tokenToType(objType.Token)
+		extPkg, _ := pkg.contextForExternalReference(objType)
+		ty = extPkg.tokenToType(objType.Token)
 	} else {
 		ty = pkg.tokenToType(objType.Token)
 	}
@@ -743,34 +744,34 @@ func (g *generator) argumentTypeName(expr model.Expression, destType model.Type,
 
 	switch destType := destType.(type) {
 	case *model.OpaqueType:
-		switch destType {
-		case model.IntType:
+		switch *destType {
+		case *model.IntType:
 			if isInput {
 				return "pulumi.Int"
 			}
 			return "int"
-		case model.NumberType:
+		case *model.NumberType:
 			if isInput {
 				return "pulumi.Float64"
 			}
 			return "float64"
-		case model.StringType:
+		case *model.StringType:
 			if isInput {
 				return "pulumi.String"
 			}
 			return "string"
-		case model.BoolType:
+		case *model.BoolType:
 			if isInput {
 				return "pulumi.Bool"
 			}
 			return "bool"
-		case model.DynamicType:
+		case *model.DynamicType:
 			if isInput {
 				return "pulumi.Any"
 			}
 			return "interface{}"
 		default:
-			return destType.Name
+			return string(*destType)
 		}
 	case *model.ObjectType:
 
@@ -909,7 +910,7 @@ func (g *generator) lowerExpression(expr model.Expression, typ model.Type) (
 	model.Expression, []interface{}) {
 	expr = pcl.RewritePropertyReferences(expr)
 	expr, diags := pcl.RewriteApplies(expr, nameInfo(0), false /*TODO*/)
-	expr = pcl.RewriteConversions(expr, typ)
+	expr, convertDiags := pcl.RewriteConversions(expr, typ)
 	expr, tTemps, ternDiags := g.rewriteTernaries(expr, g.ternaryTempSpiller)
 	expr, jTemps, jsonDiags := g.rewriteToJSON(expr)
 	expr, rTemps, readDirDiags := g.rewriteReadDir(expr, g.readDirTempSpiller)
@@ -932,12 +933,13 @@ func (g *generator) lowerExpression(expr model.Expression, typ model.Type) (
 	for _, t := range oTemps {
 		temps = append(temps, t)
 	}
+	diags = append(diags, convertDiags...)
 	diags = append(diags, ternDiags...)
 	diags = append(diags, jsonDiags...)
 	diags = append(diags, readDirDiags...)
 	diags = append(diags, splatDiags...)
 	diags = append(diags, optDiags...)
-	contract.Assert(len(diags) == 0)
+	contract.Assertf(diags.HasErrors() == false, "expected no errors in conversion, got: %v", diags.Error())
 	return expr, temps
 }
 

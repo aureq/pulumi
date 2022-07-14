@@ -202,7 +202,9 @@ func (source *getPulumiSource) Download(
 
 // githubSource can download a plugin from github releases
 type githubSource struct {
+	host         string
 	organization string
+	repository   string
 	name         string
 	kind         PluginKind
 
@@ -210,7 +212,8 @@ type githubSource struct {
 }
 
 // Creates a new github source adding authentication data in the environment, if it exists
-func newGithubSource(organization, name string, kind PluginKind) *githubSource {
+func newGithubSource(url *url.URL, name string, kind PluginKind) (*githubSource, error) {
+	contract.Assert(url.Scheme == "github")
 
 	// 14-03-2022 we stopped looking at GITHUB_PERSONAL_ACCESS_TOKEN and sending basic auth for github and
 	// instead just look at GITHUB_TOKEN and send in a header. Given GITHUB_PERSONAL_ACCESS_TOKEN was an
@@ -220,13 +223,34 @@ func newGithubSource(organization, name string, kind PluginKind) *githubSource {
 		logging.Warningf("GITHUB_PERSONAL_ACCESS_TOKEN is no longer used for Github authentication, set GITHUB_TOKEN instead")
 	}
 
+	host := url.Host
+	parts := strings.Split(strings.Trim(url.Path, "/"), "/")
+
+	if host == "" {
+		return nil, fmt.Errorf("github:// url must have a host part, was: %s", url.String())
+	}
+
+	if len(parts) != 1 && len(parts) != 2 {
+		return nil, fmt.Errorf(
+			"github:// url must have the format <host>/<organization>[/<repository>], was: %s",
+			url.String())
+	}
+
+	organization := parts[0]
+	repository := "pulumi-" + name
+	if len(parts) == 2 {
+		repository = parts[1]
+	}
+
 	return &githubSource{
+		host:         host,
 		organization: organization,
+		repository:   repository,
 		name:         name,
 		kind:         kind,
 
 		token: os.Getenv("GITHUB_TOKEN"),
-	}
+	}, nil
 }
 
 func (source *githubSource) HasAuthentication() bool {
@@ -236,8 +260,8 @@ func (source *githubSource) HasAuthentication() bool {
 func (source *githubSource) GetLatestVersion(
 	getHTTPResponse func(*http.Request) (io.ReadCloser, int64, error)) (*semver.Version, error) {
 	releaseURL := fmt.Sprintf(
-		"https://api.github.com/repos/%s/pulumi-%s/releases/latest",
-		source.organization, source.name)
+		"https://%s/repos/%s/%s/releases/latest",
+		source.host, source.organization, source.repository)
 	logging.V(9).Infof("plugin GitHub releases url: %s", releaseURL)
 	req, err := buildHTTPRequest(releaseURL, source.token)
 	if err != nil {
@@ -269,30 +293,12 @@ func (source *githubSource) GetLatestVersion(
 func (source *githubSource) Download(
 	version semver.Version, opSy string, arch string,
 	getHTTPResponse func(*http.Request) (io.ReadCloser, int64, error)) (io.ReadCloser, int64, error) {
-	if !source.HasAuthentication() {
-		// If we're not using authentication we can just download from the release/download URL
 
-		logging.V(1).Infof(
-			"%s downloading from github.com/%s/pulumi-%s/releases",
-			source.name, source.organization, source.name)
-
-		pluginURL := fmt.Sprintf("https://github.com/%s/pulumi-%s/releases/download/v%s/%s",
-			source.organization, source.name, version.String(), url.QueryEscape(fmt.Sprintf("pulumi-%s-%s-v%s-%s-%s.tar.gz",
-				source.kind, source.name, version.String(), opSy, arch)))
-
-		req, err := buildHTTPRequest(pluginURL, "")
-		if err != nil {
-			return nil, -1, err
-		}
-		return getHTTPResponse(req)
-	}
-
-	// If we are using authentication we need to lookup the asset via the github releases API
 	assetName := fmt.Sprintf("pulumi-%s-%s-v%s-%s-%s.tar.gz", source.kind, source.name, version.String(), opSy, arch)
 
 	releaseURL := fmt.Sprintf(
-		"https://api.github.com/repos/%s/pulumi-%s/releases/tags/v%s",
-		source.organization, source.name, version.String())
+		"https://%s/repos/%s/%s/releases/tags/v%s",
+		source.host, source.organization, source.repository, version.String())
 	logging.V(9).Infof("plugin GitHub releases url: %s", releaseURL)
 
 	req, err := buildHTTPRequest(releaseURL, source.token)
@@ -398,10 +404,20 @@ func newFallbackSource(name string, kind PluginKind) *fallbackSource {
 	}
 }
 
+func urlMustParse(rawURL string) *url.URL {
+	url, err := url.Parse(rawURL)
+	contract.AssertNoError(err)
+	return url
+}
+
 func (source *fallbackSource) GetLatestVersion(
 	getHTTPResponse func(*http.Request) (io.ReadCloser, int64, error)) (*semver.Version, error) {
+
 	// Try and get this package from public pulumi github
-	public := newGithubSource("pulumi", source.name, source.kind)
+	public, err := newGithubSource(urlMustParse("github://api.github.com/pulumi"), source.name, source.kind)
+	if err != nil {
+		return nil, err
+	}
 	version, err := public.GetLatestVersion(getHTTPResponse)
 	if err == nil {
 		return version, nil
@@ -415,7 +431,11 @@ func (source *fallbackSource) GetLatestVersion(
 		if repoOwner == "" {
 			privateErr = errors.New("ENV[GITHUB_REPOSITORY_OWNER] not set")
 		} else {
-			private := newGithubSource(repoOwner, source.name, source.kind)
+			// This could panic on user input, but this is experimental and will be removed at some point
+			private, err := newGithubSource(urlMustParse("github://api.github.com/"+repoOwner), source.name, source.kind)
+			if err != nil {
+				return nil, err
+			}
 			if !private.HasAuthentication() {
 				privateErr = errors.New("no GitHub authentication information provided")
 			} else {
@@ -440,7 +460,10 @@ func (source *fallbackSource) Download(
 	version semver.Version, opSy string, arch string,
 	getHTTPResponse func(*http.Request) (io.ReadCloser, int64, error)) (io.ReadCloser, int64, error) {
 	// Try and get this package from public pulumi github
-	public := newGithubSource("pulumi", source.name, source.kind)
+	public, err := newGithubSource(urlMustParse("github://api.github.com/pulumi"), source.name, source.kind)
+	if err != nil {
+		return nil, -1, err
+	}
 	resp, length, err := public.Download(version, opSy, arch, getHTTPResponse)
 	if err == nil {
 		return resp, length, nil
@@ -453,7 +476,11 @@ func (source *fallbackSource) Download(
 		if repoOwner == "" {
 			err = errors.New("ENV[GITHUB_REPOSITORY_OWNER] not set")
 		} else {
-			private := newGithubSource(repoOwner, source.name, source.kind)
+			var private *githubSource
+			private, err = newGithubSource(urlMustParse("github://api.github.com/"+repoOwner), source.name, source.kind)
+			if err != nil {
+				return nil, -1, err
+			}
 			if !private.HasAuthentication() {
 				err = errors.New("no GitHub authentication information provided")
 			} else {
@@ -485,6 +512,8 @@ type PluginInfo struct {
 	LastUsedTime      time.Time       // the last time the plugin was used.
 	PluginDownloadURL string          // an optional server to use when downloading this plugin.
 	PluginDir         string          // if set, will be used as the root plugin dir instead of ~/.pulumi/plugins.
+	SchemaPath        string          // if set, used as the path for loading and caching the schema
+	SchemaTime        time.Time       // if set and newer than the file at SchemaPath, used to invalidate a cached schema
 }
 
 // Dir gets the expected plugin directory for this plugin.
@@ -584,20 +613,47 @@ func (info *PluginInfo) SetFileMetadata(path string) error {
 
 	// Next, get the size from the directory (or, if there is none, just the file).
 	size, err := getPluginSize(path)
-	if err != nil {
-		return errors.Wrapf(err, "getting plugin dir %s size", path)
+	if err == nil {
+		info.Size = size
+	} else {
+		logging.V(6).Infof("unable to get plugin dir size for %s: %v", path, err)
 	}
-	info.Size = size
 
 	// Next get the access times from the plugin binary itself.
 	tinfo := times.Get(file)
 
-	if tinfo.HasBirthTime() {
-		info.InstallTime = tinfo.BirthTime()
+	if tinfo.HasChangeTime() {
+		info.InstallTime = tinfo.ChangeTime()
+	} else {
+		info.InstallTime = tinfo.ModTime()
 	}
 
 	info.LastUsedTime = tinfo.AccessTime()
+
+	if info.Kind == ResourcePlugin {
+		info.SetSchemaMetadata()
+	}
+
 	return nil
+}
+
+func (info *PluginInfo) SetSchemaMetadata() {
+	binpath, err := info.FilePath()
+	if err != nil {
+		return
+	}
+	bintime, err := times.Stat(binpath)
+	if err != nil {
+		return
+	}
+
+	dir, err := info.DirPath()
+	if err != nil {
+		return
+	}
+
+	info.SchemaPath = filepath.Join(dir, "schema-"+info.Name+".json")
+	info.SchemaTime = bintime.ModTime()
 }
 
 func interpolateURL(serverURL string, version semver.Version, os, arch string) string {
@@ -608,25 +664,38 @@ func interpolateURL(serverURL string, version semver.Version, os, arch string) s
 	return replacer.Replace(serverURL)
 }
 
-func (info PluginInfo) GetSource() PluginSource {
+func (info PluginInfo) GetSource() (PluginSource, error) {
 	// The plugin has a set URL use that.
 	if info.PluginDownloadURL != "" {
-		return newPluginURLSource(info.Name, info.Kind, info.PluginDownloadURL)
+		// Support schematised URLS if the URL has a "schema" part we recognize
+		url, err := url.Parse(info.PluginDownloadURL)
+		if err != nil {
+			return nil, err
+		}
+
+		if url.Scheme == "github" {
+			return newGithubSource(url, info.Name, info.Kind)
+		}
+
+		return newPluginURLSource(info.Name, info.Kind, info.PluginDownloadURL), nil
 	}
 
 	// If the plugin name matches an override, download the plugin from the override URL.
 	if url, ok := pluginDownloadURLOverridesParsed.get(info.Name); ok {
-		return newPluginURLSource(info.Name, info.Kind, url)
+		return newPluginURLSource(info.Name, info.Kind, url), nil
 	}
 
 	// Use our default fallback behaviour of github then get.pulumi.com
-	return newFallbackSource(info.Name, info.Kind)
+	return newFallbackSource(info.Name, info.Kind), nil
 }
 
 // GetLatestVersion tries to find the latest version for this plugin. This is currently only supported for
 // plugins we can get from github releases.
 func (info PluginInfo) GetLatestVersion() (*semver.Version, error) {
-	source := info.GetSource()
+	source, err := info.GetSource()
+	if err != nil {
+		return nil, err
+	}
 	return source.GetLatestVersion(getHTTPResponse)
 }
 
@@ -653,7 +722,10 @@ func (info PluginInfo) Download() (io.ReadCloser, int64, error) {
 		return nil, -1, errors.Errorf("unknown version for plugin %s", info.Name)
 	}
 
-	source := info.GetSource()
+	source, err := info.GetSource()
+	if err != nil {
+		return nil, -1, err
+	}
 	return source.Download(*info.Version, opSy, arch, getHTTPResponse)
 }
 
@@ -1015,12 +1087,13 @@ func getPlugins(dir string, skipMetadata bool) ([]PluginInfo, error) {
 	for _, file := range files {
 		// Skip anything that doesn't look like a plugin.
 		if kind, name, version, ok := tryPlugin(file); ok {
+			path := filepath.Join(dir, file.Name())
 			plugin := PluginInfo{
 				Name:    name,
 				Kind:    kind,
 				Version: &version,
+				Path:    path,
 			}
-			path := filepath.Join(dir, file.Name())
 			if _, err := os.Stat(fmt.Sprintf("%s.partial", path)); err == nil {
 				// Skip it if the partial file exists, meaning the plugin is not fully installed.
 				continue
@@ -1044,6 +1117,53 @@ func getPlugins(dir string, skipMetadata bool) ([]PluginInfo, error) {
 // using standard semver sorting rules.  A plugin may be overridden entirely by placing it on your $PATH, though it is
 // possible to opt out of this behavior by setting PULUMI_IGNORE_AMBIENT_PLUGINS to any non-empty value.
 func GetPluginPath(kind PluginKind, name string, version *semver.Version) (string, string, error) {
+	info, path, err := getPluginInfoOrPath(kind, name, version, true /* skipMetadata */)
+	if err != nil {
+		return "", "", err
+	}
+
+	if info != nil {
+		matchDir, err := info.DirPath()
+		if err != nil {
+			return "", "", err
+		}
+
+		matchPath, err := info.FilePath()
+		if err != nil {
+			return "", "", err
+		}
+
+		return matchDir, matchPath, nil
+	}
+
+	return "", path, err
+}
+
+func GetPluginInfo(kind PluginKind, name string, version *semver.Version) (*PluginInfo, error) {
+	info, path, err := getPluginInfoOrPath(kind, name, version, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if info != nil {
+		return info, nil
+	}
+
+	info = &PluginInfo{
+		Kind: kind,
+		Name: name,
+		Path: filepath.Dir(path),
+	}
+
+	return info, nil
+}
+
+// getPluginInfoOrPath searches for a compatible plugin kind, name, and version and returns either:
+//  * if found as an ambient plugin, nil and the path to the executable
+//  * if found in the pulumi dir's installed plugins, a PluginInfo and path to the executable
+//  * an error in all other cases.
+func getPluginInfoOrPath(
+	kind PluginKind, name string, version *semver.Version, skipMetadata bool) (*PluginInfo, string, error) {
 	var filename string
 
 	// We currently bundle some plugins with "pulumi" and thus expect them to be next to the pulumi binary. We
@@ -1061,7 +1181,7 @@ func GetPluginPath(kind PluginKind, name string, version *semver.Version) (strin
 		filename = (&PluginInfo{Kind: kind, Name: name, Version: version}).FilePrefix()
 		if path, err := exec.LookPath(filename); err == nil {
 			logging.V(6).Infof("GetPluginPath(%s, %s, %v): found on $PATH %s", kind, name, version, path)
-			return "", path, nil
+			return nil, path, nil
 		}
 	}
 
@@ -1086,7 +1206,7 @@ func GetPluginPath(kind PluginKind, name string, version *semver.Version) (strin
 						logging.V(6).Infof("GetPluginPath(%s, %s, %v): found next to current executable %s",
 							kind, name, version, candidate)
 
-						return "", candidate, nil
+						return nil, candidate, nil
 					}
 				}
 			}
@@ -1094,9 +1214,15 @@ func GetPluginPath(kind PluginKind, name string, version *semver.Version) (strin
 	}
 
 	// Otherwise, check the plugin cache.
-	plugins, err := GetPlugins()
+	var plugins []PluginInfo
+	var err error
+	if skipMetadata {
+		plugins, err = GetPlugins()
+	} else {
+		plugins, err = GetPluginsWithMetadata()
+	}
 	if err != nil {
-		return "", "", errors.Wrapf(err, "loading plugin list")
+		return nil, "", errors.Wrapf(err, "loading plugin list")
 	}
 
 	var match *PluginInfo
@@ -1104,7 +1230,7 @@ func GetPluginPath(kind PluginKind, name string, version *semver.Version) (strin
 		logging.V(6).Infof("GetPluginPath(%s, %s, %s): enabling new plugin behavior", kind, name, version)
 		candidate, err := SelectCompatiblePlugin(plugins, kind, name, semver.MustParseRange(version.String()))
 		if err != nil {
-			return "", "", NewMissingError(PluginInfo{
+			return nil, "", NewMissingError(PluginInfo{
 				Name:    name,
 				Kind:    kind,
 				Version: version,
@@ -1139,20 +1265,16 @@ func GetPluginPath(kind PluginKind, name string, version *semver.Version) (strin
 	}
 
 	if match != nil {
-		matchDir, err := match.DirPath()
-		if err != nil {
-			return "", "", err
-		}
 		matchPath, err := match.FilePath()
 		if err != nil {
-			return "", "", err
+			return nil, "", err
 		}
 
 		logging.V(6).Infof("GetPluginPath(%s, %s, %v): found in cache at %s", kind, name, version, matchPath)
-		return matchDir, matchPath, nil
+		return match, matchPath, nil
 	}
 
-	return "", "", NewMissingError(PluginInfo{
+	return nil, "", NewMissingError(PluginInfo{
 		Name:    name,
 		Kind:    kind,
 		Version: version,

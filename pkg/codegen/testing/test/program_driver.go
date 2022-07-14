@@ -75,6 +75,10 @@ var PulumiPulumiProgramTests = []ProgramTest{
 		// Flaky in go: TODO[pulumi/pulumi#8123]
 	},
 	{
+		Directory:   "aws-iam-policy",
+		Description: "AWS IAM Policy",
+	},
+	{
 		Directory:   "aws-optionals",
 		Description: "AWS get invoke with nested object constructor that takes an optional string",
 		// Testing Go behavior exclusively:

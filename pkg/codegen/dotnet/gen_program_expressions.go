@@ -40,13 +40,14 @@ func (nameInfo) Format(name string) string {
 func (g *generator) lowerExpression(expr model.Expression, typ model.Type) model.Expression {
 	expr = pcl.RewritePropertyReferences(expr)
 	expr, diags := pcl.RewriteApplies(expr, nameInfo(0), !g.asyncInit)
-	contract.Assert(len(diags) == 0)
-	expr = pcl.RewriteConversions(expr, typ)
+	expr, convertDiags := pcl.RewriteConversions(expr, typ)
 	if g.asyncInit {
 		expr = g.awaitInvokes(expr)
 	} else {
 		expr = g.outputInvokes(expr)
 	}
+	diags = diags.Extend(convertDiags)
+	contract.Assertf(diags.HasErrors() == false, "expected no errors in conversion, got: %v", diags.Error())
 	return expr
 }
 
@@ -438,7 +439,7 @@ func (g *generator) GenFunctionCallExpression(w io.Writer, expr *model.FunctionC
 	case "split":
 		g.Fgenf(w, "%.20v.Split(%v)", expr.Args[1], expr.Args[0])
 	case "toBase64":
-		g.Fgenf(w, "Convert.ToBase64String(System.Text.UTF8.GetBytes(%v))", expr.Args[0])
+		g.Fgenf(w, "Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(%v))", expr.Args[0])
 	case "toJSON":
 		g.Fgen(w, "JsonSerializer.Serialize(")
 		g.genDictionaryOrTuple(w, expr.Args[0])

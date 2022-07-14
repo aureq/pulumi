@@ -21,10 +21,10 @@ import (
 
 	"github.com/pulumi/pulumi/pkg/v3/backend"
 	"github.com/pulumi/pulumi/pkg/v3/backend/httpstate/client"
-	"github.com/pulumi/pulumi/pkg/v3/engine"
 	"github.com/pulumi/pulumi/pkg/v3/operations"
 	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	sdkDisplay "github.com/pulumi/pulumi/sdk/v3/go/common/display"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
@@ -112,7 +112,6 @@ func (s *cloudStack) CurrentOperation() *apitype.OperationStatus { return s.curr
 func (s *cloudStack) Tags() map[apitype.StackTagName]string      { return s.tags }
 
 func (s *cloudStack) StackIdentifier() client.StackIdentifier {
-
 	si, err := s.b.getCloudStackIdentifier(s.ref)
 	contract.AssertNoError(err) // the above only fails when ref is of the wrong type.
 	return si
@@ -142,25 +141,28 @@ func (s *cloudStack) Rename(ctx context.Context, newName tokens.QName) (backend.
 
 func (s *cloudStack) Preview(
 	ctx context.Context,
-	op backend.UpdateOperation) (*deploy.Plan, engine.ResourceChanges, result.Result) {
+	op backend.UpdateOperation) (*deploy.Plan, sdkDisplay.ResourceChanges, result.Result) {
 
 	return backend.PreviewStack(ctx, s, op)
 }
 
-func (s *cloudStack) Update(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
+func (s *cloudStack) Update(ctx context.Context, op backend.UpdateOperation) (sdkDisplay.ResourceChanges,
+	result.Result) {
 	return backend.UpdateStack(ctx, s, op)
 }
 
 func (s *cloudStack) Import(ctx context.Context, op backend.UpdateOperation,
-	imports []deploy.Import) (engine.ResourceChanges, result.Result) {
+	imports []deploy.Import) (sdkDisplay.ResourceChanges, result.Result) {
 	return backend.ImportStack(ctx, s, op, imports)
 }
 
-func (s *cloudStack) Refresh(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
+func (s *cloudStack) Refresh(ctx context.Context, op backend.UpdateOperation) (sdkDisplay.ResourceChanges,
+	result.Result) {
 	return backend.RefreshStack(ctx, s, op)
 }
 
-func (s *cloudStack) Destroy(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
+func (s *cloudStack) Destroy(ctx context.Context, op backend.UpdateOperation) (sdkDisplay.ResourceChanges,
+	result.Result) {
 	return backend.DestroyStack(ctx, s, op)
 }
 

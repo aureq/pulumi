@@ -68,6 +68,7 @@ func newUpCmd() *cobra.Command {
 	var showSames bool
 	var showReads bool
 	var skipPreview bool
+	var showFullOutput bool
 	var suppressOutputs bool
 	var suppressPermalink string
 	var yes bool
@@ -190,7 +191,7 @@ func newUpCmd() *cobra.Command {
 			return result.FromError(errors.New("update cancelled"))
 		case res != nil:
 			return PrintEngineResult(res)
-		case expectNop && changes != nil && changes.HasChanges():
+		case expectNop && changes != nil && engine.HasChanges(changes):
 			return result.FromError(errors.New("error: no changes were expected but changes occurred"))
 		default:
 			return nil
@@ -367,7 +368,7 @@ func newUpCmd() *cobra.Command {
 			return result.FromError(errors.New("update cancelled"))
 		case res != nil:
 			return PrintEngineResult(res)
-		case expectNop && changes != nil && changes.HasChanges():
+		case expectNop && changes != nil && engine.HasChanges(changes):
 			return result.FromError(errors.New("error: no changes were expected but changes occurred"))
 		default:
 			return nil
@@ -392,11 +393,12 @@ func newUpCmd() *cobra.Command {
 			"`--cwd` flag to use a different directory.",
 		Args: cmdutil.MaximumNArgs(1),
 		Run: cmdutil.RunResultFunc(func(cmd *cobra.Command, args []string) result.Result {
-			yes = yes || skipConfirmations()
+			yes = yes || skipPreview || skipConfirmations()
 
 			interactive := cmdutil.Interactive()
 			if !interactive && !yes {
-				return result.FromError(errors.New("--yes must be passed in to proceed when running in non-interactive mode"))
+				return result.FromError(
+					errors.New("--yes or --skip-preview must be passed in to proceed when running in non-interactive mode"))
 			}
 
 			opts, err := updateFlagsToOptions(interactive, skipPreview, yes)
@@ -420,6 +422,7 @@ func newUpCmd() *cobra.Command {
 				ShowSameResources:    showSames,
 				ShowReads:            showReads,
 				SuppressOutputs:      suppressOutputs,
+				TruncateOutput:       !showFullOutput,
 				IsInteractive:        interactive,
 				Type:                 displayType,
 				EventLogPath:         eventLogPath,
@@ -542,6 +545,9 @@ func newUpCmd() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(
 		&suppressOutputs, "suppress-outputs", false,
 		"Suppress display of stack outputs (in case they contain sensitive values)")
+	cmd.PersistentFlags().BoolVar(
+		&showFullOutput, "show-full-output", true,
+		"Display full length of stack outputs")
 	cmd.PersistentFlags().StringVar(
 		&suppressPermalink, "suppress-permalink", "",
 		"Suppress display of the state permalink")

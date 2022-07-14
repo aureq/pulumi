@@ -265,9 +265,8 @@ var PulumiPulumiSDKTests = []*SDKTest{
 		Skip:        allLanguages.Except("python/any"),
 	},
 	{
-		Directory:   "enum-reference-python",
+		Directory:   "enum-reference",
 		Description: "Ensure referencing external types/resources with referenced enums import correctly",
-		Skip:        allLanguages.Except("python/any"),
 	},
 	{
 		Directory:   "internal-dependencies-go",
@@ -277,6 +276,11 @@ var PulumiPulumiSDKTests = []*SDKTest{
 	{
 		Directory:   "go-plain-ref-repro",
 		Description: "Generate a resource that accepts a plain input type",
+		Skip:        allLanguages.Except("go/any"),
+	},
+	{
+		Directory:   "go-nested-collections",
+		Description: "Generate a resource that outputs [][][]Foo",
 		Skip:        allLanguages.Except("go/any"),
 	},
 }
@@ -378,6 +382,7 @@ func TestSDKCodegen(t *testing.T, opts *SDKCodegenOptions) { // revive:disable-l
 	require.NotNil(t, opts.TestCases, "No test cases were provided. This was probably a mistake")
 	for _, tt := range opts.TestCases {
 		tt := tt // avoid capturing loop variable `sdkTest` in the closure
+
 		t.Run(tt.Directory, func(t *testing.T) {
 			t.Parallel()
 
