@@ -18,18 +18,19 @@
 package backend
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os/exec"
 	"path"
 	"strings"
 	"time"
-
-	"github.com/rjeczalik/notify"
 
 	"github.com/pulumi/pulumi/pkg/v3/backend/display"
 	"github.com/pulumi/pulumi/pkg/v3/operations"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
 )
@@ -70,23 +71,37 @@ func Watch(ctx context.Context, b Backend, stack Stack, op UpdateOperation,
 		}
 	}()
 
-	events := make(chan notify.EventInfo, 1)
-
+	var args []string
 	for _, p := range paths {
 		// Provided paths can be both relative and absolute.
 		watchPath := ""
 		if path.IsAbs(p) {
-			watchPath = path.Join(p, "...")
+			watchPath = p
 		} else {
-			watchPath = path.Join(op.Root, p, "...")
+			watchPath = path.Join(op.Root, p)
 		}
 
-		if err := notify.Watch(watchPath, events, notify.All); err != nil {
-			return result.FromError(err)
-		}
+		args = append(args, "-w", watchPath)
 	}
 
-	defer notify.Stop(events)
+	_, err := exec.LookPath("watchexec")
+	if err != nil {
+		return result.Error("Install watchexec (see: github.com/watchexec/watchexec) to use pulumi watch")
+	}
+
+	args = append(args, "--", "echo", "pulumi")
+	cmd := exec.Command("watchexec", args...)
+	cmdutil.RegisterProcessGroup(cmd)
+	reader, _ := cmd.StdoutPipe()
+
+	scanner := bufio.NewScanner(reader)
+	events := make(chan string)
+	go stdoutToChannel(scanner, events)
+	err = cmd.Start()
+	if err != nil {
+		return result.Errorf("watchexec error: %w", err)
+	}
+	defer cmd.Process.Kill()
 
 	fmt.Printf(op.Opts.Display.Color.Colorize(
 		colors.SpecHeadline+"Watching (%s):"+colors.Reset+"\n"), stack.Ref())
@@ -108,8 +123,13 @@ func Watch(ctx context.Context, b Backend, stack Stack, op UpdateOperation,
 			display.PrintfWithWatchPrefix(time.Now(), "",
 				op.Opts.Display.Color.Colorize(colors.SpecImportant+"Update complete."+colors.Reset+"\n"))
 		}
-
 	}
 
 	return nil
+}
+
+func stdoutToChannel(scanner *bufio.Scanner, out chan string) {
+	for scanner.Scan() {
+		out <- scanner.Text()
+	}
 }
