@@ -99,9 +99,12 @@ func Watch(ctx context.Context, b Backend, stack Stack, op UpdateOperation,
 	go stdoutToChannel(scanner, events)
 	err = cmd.Start()
 	if err != nil {
-		return result.Errorf("watchexec error: %w", err)
+		return result.Errorf("watchexec error: %v", err)
 	}
-	defer cmd.Process.Kill()
+	defer func() {
+		err := cmd.Process.Kill()
+		contract.AssertNoErrorf(err, "Unexpected error stopping watchexec process: %v", err)
+	}()
 
 	fmt.Printf(op.Opts.Display.Color.Colorize(
 		colors.SpecHeadline+"Watching (%s):"+colors.Reset+"\n"), stack.Ref())
